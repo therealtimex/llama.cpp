@@ -58,7 +58,7 @@ Polls `ggml-org/llama.cpp` for newer `b*` tags than the latest `realtimex-b*` re
 
 | Mode | Behavior |
 |------|----------|
-| Cron (every 3h) | Detect and report only; does not dispatch an expensive build |
+| Cron (hourly) | Build the full matrix for a new tag and publish after all 12 variants pass |
 | Manual | Can force tag, toggle promote/publish/cuda |
 
 ```bash

@@ -1,16 +1,16 @@
 # Watch ggml-org/llama.cpp for new b* tags and optionally dispatch promote.
 #
-# Default policy (safe):
-#   - Cron / dispatch detects newer upstream tags
-#   - Does NOT publish releases automatically
-#   - Optional dry-run promote (artifacts only) when dispatch_promote=true
+# Default policy:
+#   - Hourly cron detects newer upstream tags
+#   - Cron dispatches the full matrix and publishes only after it is complete
+#   - Manual dispatch can run an artifact-only dry run
 #
 name: RealTimeX Watch Upstream
 
 on:
   schedule:
-    # Every 3 hours (offset to avoid top-of-hour pileups)
-    - cron: "17 */3 * * *"
+    # Hourly (offset to avoid top-of-hour pileups)
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       dispatch_promote:
@@ -125,8 +125,7 @@ jobs:
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             WANT="$WANT_MANUAL"
           else
-            # Cron detects only. Manual dispatch controls expensive promotion runs.
-            WANT="false"
+            WANT="true"
           fi
 
           if [[ "$UPDATED" == "true" && "$WANT" == "true" ]]; then
@@ -149,13 +148,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.watch.outputs.latestUpstream }}
           REPO: ${{ github.repository }}
-          PUBLISH: ${{ inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
           BUILD_CUDA_X64: ${{ inputs.build_linux_cuda_x64 }}
           BUILD_CUDA_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
         run: |
           set -euo pipefail
           # Normalize boolean-ish inputs to true/false strings for workflow inputs
-          if [[ "${PUBLISH}" == "true" ]]; then
+          if [[ "${EVENT_NAME}" == "schedule" || "${PUBLISH_REQUESTED}" == "true" ]]; then
             PUBLISH_FLAG=true
           else
             PUBLISH_FLAG=false
