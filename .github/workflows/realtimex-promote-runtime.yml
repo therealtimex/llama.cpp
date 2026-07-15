@@ -352,6 +352,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p realtimex-dist
+          rm -f realtimex-dist/*.zip
           python3 packaging/realtimex/scripts/package_built_runtime.py \
             --tag "${TAG}" \
             --matrix-id linux-arm64-cuda \
@@ -359,12 +360,26 @@ jobs:
             --out-dir realtimex-dist
 
       - name: Upload dist artifact
+        id: upload_arm64
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-linux-arm64-cuda
-          path: realtimex-dist/*.zip
+          path: realtimex-dist/llama-server-linux-arm64-cuda-${{ needs.validate-tag.outputs.tag }}.zip
           if-no-files-found: error
           retention-days: 1
+          compression-level: 0
+
+      - name: Retry dist artifact upload
+        if: steps.upload_arm64.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-linux-arm64-cuda
+          path: realtimex-dist/llama-server-linux-arm64-cuda-${{ needs.validate-tag.outputs.tag }}.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
 
   assemble:
     name: Assemble runtime artifacts
