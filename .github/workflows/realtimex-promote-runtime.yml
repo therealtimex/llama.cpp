@@ -28,10 +28,10 @@ on:
         type: boolean
         default: true
       build_linux_cuda_arm64:
-        description: "Build linux-arm64-cuda (optional / Jetson Orin SM87)"
+        description: "Build linux-arm64-cuda (Jetson Orin SM87 + DGX Spark SM121)"
         required: false
         type: boolean
-        default: false
+        default: true
       fail_on_missing_official:
         description: "Fail the whole matrix if an official upstream asset is missing"
         required: false
@@ -87,6 +87,18 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "release_tag=realtimex-${tag}" >> "$GITHUB_OUTPUT"
           echo "Promoting llama.cpp ${tag} -> release realtimex-${tag}"
+
+      - name: Require full CUDA matrix for publish
+        if: inputs.publish
+        env:
+          BUILD_CUDA_X64: ${{ inputs.build_linux_cuda_x64 }}
+          BUILD_CUDA_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_CUDA_X64" != "true" || "$BUILD_CUDA_ARM64" != "true" ]]; then
+            echo "Publishing requires both Linux CUDA builds"
+            exit 1
+          fi
 
   repack-official:
     name: Repack ${{ matrix.id }}
@@ -261,7 +273,8 @@ jobs:
     name: Build linux-arm64-cuda
     needs: validate-tag
     if: inputs.build_linux_cuda_arm64
-    runs-on: ubuntu-22.04-arm
+    runs-on: [self-hosted, Linux, ARM64, dgx-spark, llama-cpp]
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -279,59 +292,31 @@ jobs:
           sparse-checkout-cone-mode: true
           path: packaging
 
-      - name: Install build deps
+      - name: Verify DGX Spark build environment
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build
-
-      - name: Install CUDA toolkit (arm64)
-        # Network toolkit action may not support all arm hosts; fall back to distro packages when needed.
-        continue-on-error: true
-        uses: Jimver/cuda-toolkit@b6fc3a9f3f15256d9d94ffe1254f9c5a2565cde6 # v0.2.30
-        with:
-          cuda: "12.4.0"
-          method: network
-
-      - name: Ensure nvcc available
-        run: |
-          set -euo pipefail
-          if command -v nvcc >/dev/null 2>&1; then
-            nvcc --version
-            exit 0
-          fi
-          # Best-effort distro install for arm runners
-          sudo apt-get install -y nvidia-cuda-toolkit || true
-          command -v nvcc
+          test -x /usr/local/cuda-13.0/bin/nvcc
+          export PATH="/usr/local/cuda-13.0/bin:$PATH"
+          echo "/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
+          echo "CUDACXX=/usr/local/cuda-13.0/bin/nvcc" >> "$GITHUB_ENV"
+          echo "CUDA_HOME=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
+          cmake --version
+          ninja --version
           nvcc --version
-
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639 # v1.2
-        with:
-          key: linux-arm64-cuda-${{ needs.validate-tag.outputs.tag }}
-          restore-keys: |
-            linux-arm64-cuda-
-          max-size: 2G
+          nvcc --list-gpu-code | grep -Fx sm_87
+          nvcc --list-gpu-code | grep -Fx sm_121
 
       - name: Configure & build llama-server
         working-directory: llama.cpp
         env:
-          # GHA arm CUDA is rare; keep one modern arch for speed. Spark uses on-device 121.
-          CMAKE_CUDA_ARCHITECTURES: "87-real"
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
-          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_ARCHITECTURES: "87-real;121a-real"
         run: |
           set -euo pipefail
-          ccache -z || true
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DGGML_CUDA=ON \
             -DGGML_NATIVE=OFF \
-            -DGGML_CCACHE=ON \
+            -DGGML_CCACHE=OFF \
             -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
             -DLLAMA_BUILD_COMMON=ON \
             -DLLAMA_BUILD_TOOLS=ON \
@@ -347,7 +332,15 @@ jobs:
           fi
           cmake --build build --config Release --target llama-server -j"$(nproc)"
           find build -name 'llama-server' -type f -print
-          ccache -s || true
+
+      - name: Smoke CUDA runtime on DGX Spark
+        working-directory: llama.cpp
+        run: |
+          set -euo pipefail
+          build/bin/llama-server --version
+          devices="$(build/bin/llama-server --list-devices)"
+          echo "$devices"
+          grep -q 'CUDA0: NVIDIA GB10' <<< "$devices"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:

@@ -5,8 +5,6 @@
 #   - Does NOT publish releases automatically
 #   - Optional dry-run promote (artifacts only) when dispatch_promote=true
 #
-# DGX Spark arm64-cuda is intentionally NOT built here (on-device / manual).
-#
 name: RealTimeX Watch Upstream
 
 on:
@@ -25,6 +23,10 @@ on:
         default: false
       build_linux_cuda_x64:
         description: "When dispatching promote, build linux-x64-cuda"
+        type: boolean
+        default: true
+      build_linux_cuda_arm64:
+        description: "When dispatching promote, build linux-arm64-cuda"
         type: boolean
         default: true
       force_tag:
@@ -148,7 +150,8 @@ jobs:
           TAG: ${{ needs.watch.outputs.latestUpstream }}
           REPO: ${{ github.repository }}
           PUBLISH: ${{ inputs.publish }}
-          BUILD_CUDA: ${{ inputs.build_linux_cuda_x64 }}
+          BUILD_CUDA_X64: ${{ inputs.build_linux_cuda_x64 }}
+          BUILD_CUDA_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
         run: |
           set -euo pipefail
           # Normalize boolean-ish inputs to true/false strings for workflow inputs
@@ -157,19 +160,24 @@ jobs:
           else
             PUBLISH_FLAG=false
           fi
-          if [[ "${BUILD_CUDA}" == "false" ]]; then
-            CUDA_FLAG=false
+          if [[ "${BUILD_CUDA_X64}" == "false" ]]; then
+            CUDA_X64_FLAG=false
           else
-            CUDA_FLAG=true
+            CUDA_X64_FLAG=true
+          fi
+          if [[ "${BUILD_CUDA_ARM64}" == "false" ]]; then
+            CUDA_ARM64_FLAG=false
+          else
+            CUDA_ARM64_FLAG=true
           fi
 
-          echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, linux_cuda_x64=${CUDA_FLAG})"
+          echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, linux_cuda_x64=${CUDA_X64_FLAG}, linux_cuda_arm64=${CUDA_ARM64_FLAG})"
           gh workflow run realtimex-promote-runtime.yml \
             --repo "${REPO}" \
             -f "llama_cpp_tag=${TAG}" \
             -f "publish=${PUBLISH_FLAG}" \
-            -f "build_linux_cuda_x64=${CUDA_FLAG}" \
-            -f "build_linux_cuda_arm64=false" \
+            -f "build_linux_cuda_x64=${CUDA_X64_FLAG}" \
+            -f "build_linux_cuda_arm64=${CUDA_ARM64_FLAG}" \
             -f "fail_on_missing_official=false"
 
           {
@@ -177,8 +185,8 @@ jobs:
             echo ""
             echo "- Tag: \`${TAG}\`"
             echo "- Publish: \`${PUBLISH_FLAG}\`"
-            echo "- build_linux_cuda_x64: \`${CUDA_FLAG}\`"
-            echo "- build_linux_arm64_cuda: \`false\` (use DGX Spark on-device)"
+            echo "- build_linux_cuda_x64: \`${CUDA_X64_FLAG}\`"
+            echo "- build_linux_cuda_arm64: \`${CUDA_ARM64_FLAG}\`"
             echo ""
             echo "Monitor: https://github.com/${REPO}/actions/workflows/realtimex-promote-runtime.yml"
           } >> "$GITHUB_STEP_SUMMARY"

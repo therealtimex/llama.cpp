@@ -388,15 +388,12 @@ def find_server_binary(root: Path) -> Optional[Path]:
 
 
 def is_probably_runtime_lib(path: Path) -> bool:
-    name = path.name
-    lower = name.lower()
+    lower = path.name.lower()
     if lower in SERVER_NAMES:
         return False
     if lower.endswith((".dll", ".dylib", ".so", ".metal")):
         return True
     if ".so." in lower:
-        return True
-    if lower.startswith(("libllama", "libggml", "libmtmd", "ggml", "llama", "mtmd")):
         return True
     return False
 

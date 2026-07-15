@@ -45,10 +45,10 @@ gh workflow run realtimex-promote-runtime.yml \
   -f llama_cpp_tag=b10012 \
   -f publish=true \
   -f build_linux_cuda_x64=true \
-  -f build_linux_cuda_arm64=false
+  -f build_linux_cuda_arm64=true
 ```
 
-Publishing requires the complete official asset matrix plus every enabled self-build. Published `realtimex-b*` releases are immutable; use a new tag rather than rerunning a published release.
+Publishing requires all 12 runtime variants, including both Linux CUDA self-builds. The CUDA inputs may be disabled only for artifact-only dry runs. Published `realtimex-b*` releases are immutable; use a new tag rather than rerunning a published release.
 
 ### Watch upstream (from node-llama-cpp "Watch llama.cpp")
 
@@ -60,8 +60,6 @@ Polls `ggml-org/llama.cpp` for newer `b*` tags than the latest `realtimex-b*` re
 |------|----------|
 | Cron (every 3h) | Detect and report only; does not dispatch an expensive build |
 | Manual | Can force tag, toggle promote/publish/cuda |
-
-**Not automated here:** DGX Spark `linux-arm64-cuda` (build on-device, upload to the release).
 
 ```bash
 # Check + dry-run promote if behind
@@ -121,16 +119,16 @@ python3 realtimex/scripts/package_built_runtime.py \
 ## Asset matrix (summary)
 
 - **Official -> repack:** macOS arm64/x64, Linux CPU/Vulkan, Windows CPU/CUDA/Vulkan
-- **Self-build:** Linux x64 CUDA (default on), Linux arm64 CUDA (opt-in)
+- **Self-build:** Linux x64 CUDA and Linux arm64 CUDA (default on)
 
 GPU naming rules (must match RealTimeX Go/JS):
 
 - `cuda` / `vulkan` appear in the filename
 - `metal` / `cpu` do **not** appear in the filename (meta still has `"gpu": "metal"` or `false`)
 
-## Linux CUDA build speed (GHA)
+## Linux CUDA builds
 
-`build-linux-cuda-x64` optimizes for CI time:
+`build-linux-cuda-x64` uses a GitHub-hosted runner and optimizes for CI time:
 
 | Setting | Value | Why |
 |---------|-------|-----|
@@ -141,4 +139,6 @@ GPU naming rules (must match RealTimeX Go/JS):
 | Transfer artifact retention | 1 day | Matrix artifacts are temporary inputs to assembly |
 | Combined artifact retention | 7 days | Preserve dry-run output without long-term duplication |
 
-The generic Linux x64 CUDA package covers Turing (`75`), Ampere (`80`/`86`), Ada (`89`), and Hopper (`90`). The opt-in GHA arm64 CUDA package targets Jetson Orin (`87`); DGX Spark stays on-device (`121`).
+The generic Linux x64 CUDA package covers Turing (`75`), Ampere (`80`/`86`), Ada (`89`), and Hopper (`90`). The Linux arm64 CUDA package uses CUDA 13 and includes native code for Jetson Orin (`87`) and DGX Spark (`121a`).
+
+`build-linux-cuda-arm64` runs on the RealTimeX DGX Spark runner. The repository-scoped runner must be online with the default `self-hosted`, `Linux`, and `ARM64` labels plus `dgx-spark` and `llama-cpp`.
