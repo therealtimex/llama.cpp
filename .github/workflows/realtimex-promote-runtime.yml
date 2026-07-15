@@ -168,19 +168,33 @@ jobs:
           cuda: "12.4.0"
           method: network
 
+      # llama-server lives under tools/; LLAMA_BUILD_TOOLS must be ON.
+      # GHA has no GPU — do not use CMAKE_CUDA_ARCHITECTURES=native.
       - name: Configure & build llama-server
         working-directory: llama.cpp
+        env:
+          CMAKE_CUDA_ARCHITECTURES: "75;80;86;89;90"
         run: |
           set -euo pipefail
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_CURL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF
+            -DLLAMA_BUILD_APP=OFF
+          if ! cmake --build build --target help 2>/dev/null | grep -qE '^llama-server:'; then
+            echo "error: cmake target llama-server was not generated"
+            cmake --build build --target help 2>/dev/null | head -100 || true
+            exit 1
+          fi
           cmake --build build --config Release --target llama-server -j"$(nproc)"
+          find build -name 'llama-server' -type f -print
 
       - uses: actions/setup-python@v5
         with:
@@ -254,17 +268,29 @@ jobs:
 
       - name: Configure & build llama-server
         working-directory: llama.cpp
+        env:
+          CMAKE_CUDA_ARCHITECTURES: "72;75;80;86;87;89;90"
         run: |
           set -euo pipefail
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_CURL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF
+            -DLLAMA_BUILD_APP=OFF
+          if ! cmake --build build --target help 2>/dev/null | grep -qE '^llama-server:'; then
+            echo "error: cmake target llama-server was not generated"
+            cmake --build build --target help 2>/dev/null | head -100 || true
+            exit 1
+          fi
           cmake --build build --config Release --target llama-server -j"$(nproc)"
+          find build -name 'llama-server' -type f -print
 
       - uses: actions/setup-python@v5
         with:
