@@ -141,6 +141,8 @@ jobs:
     needs: validate-tag
     if: github.event.inputs.build_linux_cuda_x64 == 'true'
     runs-on: ubuntu-22.04
+    # Multi-arch CUDA is the bottleneck; keep this job focused.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -159,27 +161,52 @@ jobs:
       - name: Install build deps
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake ninja-build ccache
 
+      # Cache toolkit downloads between runs (large win on cold runners)
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: "12.4.0"
           method: network
+          use-github-cache: true
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-x64-cuda-${{ needs.validate-tag.outputs.tag }}
+          restore-keys: |
+            linux-x64-cuda-
+          max-size: 2G
 
       # llama-server lives under tools/; LLAMA_BUILD_TOOLS must be ON.
-      # GHA has no GPU — do not use CMAKE_CUDA_ARCHITECTURES=native.
+      # Speed notes:
+      # - Fewer CUDA arches = much faster compile (was 75;80;86;89;90).
+      # - 86+89 covers Ampere consumer + Ada; add 75/80 only if you need older GPUs.
+      # - Build only target llama-server (not full tools suite).
+      # - ccache speeds rebuilds when the same tag/re-run hits similar objects.
       - name: Configure & build llama-server
         working-directory: llama.cpp
         env:
-          CMAKE_CUDA_ARCHITECTURES: "75;80;86;89;90"
+          # Prefer real SASS only (no fat multi-arch blob)
+          CMAKE_CUDA_ARCHITECTURES: "86-real;89-real"
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+          CCACHE_SLOPPINESS: "pch_defines,time_macros"
         run: |
           set -euo pipefail
+          ccache -z || true
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DGGML_CUDA=ON \
             -DGGML_NATIVE=OFF \
+            -DGGML_CCACHE=ON \
             -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
             -DLLAMA_BUILD_COMMON=ON \
             -DLLAMA_BUILD_TOOLS=ON \
@@ -187,14 +214,18 @@ jobs:
             -DLLAMA_CURL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_APP=OFF
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_UI=ON \
+            -DLLAMA_USE_PREBUILT_UI=ON
           if ! cmake --build build --target help 2>/dev/null | grep -qE '^llama-server:'; then
             echo "error: cmake target llama-server was not generated"
             cmake --build build --target help 2>/dev/null | head -100 || true
             exit 1
           fi
+          # Only build llama-server + its deps (not every tool under tools/)
           cmake --build build --config Release --target llama-server -j"$(nproc)"
           find build -name 'llama-server' -type f -print
+          ccache -s || true
 
       - uses: actions/setup-python@v5
         with:
@@ -209,8 +240,8 @@ jobs:
           python3 packaging/realtimex/scripts/package_built_runtime.py \
             --tag "${TAG}" \
             --matrix-id linux-x64-cuda \
-            --build-dir llama.cpp/build \
-            --out-dir realtimex-dist
+            --out-dir realtimex-dist \
+            --build-dir llama.cpp/build
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
@@ -266,16 +297,33 @@ jobs:
           command -v nvcc
           nvcc --version
 
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-arm64-cuda-${{ needs.validate-tag.outputs.tag }}
+          restore-keys: |
+            linux-arm64-cuda-
+          max-size: 2G
+
       - name: Configure & build llama-server
         working-directory: llama.cpp
         env:
-          CMAKE_CUDA_ARCHITECTURES: "72;75;80;86;87;89;90"
+          # GHA arm CUDA is rare; keep one modern arch for speed. Spark uses on-device 121.
+          CMAKE_CUDA_ARCHITECTURES: "87-real"
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache
         run: |
           set -euo pipefail
+          ccache -z || true
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DGGML_CUDA=ON \
             -DGGML_NATIVE=OFF \
+            -DGGML_CCACHE=ON \
             -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
             -DLLAMA_BUILD_COMMON=ON \
             -DLLAMA_BUILD_TOOLS=ON \
@@ -291,6 +339,7 @@ jobs:
           fi
           cmake --build build --config Release --target llama-server -j"$(nproc)"
           find build -name 'llama-server' -type f -print
+          ccache -s || true
 
       - uses: actions/setup-python@v5
         with:

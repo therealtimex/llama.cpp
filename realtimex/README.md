@@ -125,3 +125,17 @@ GPU naming rules (must match RealTimeX Go/JS):
 
 - `cuda` / `vulkan` appear in the filename
 - `metal` / `cpu` do **not** appear in the filename (meta still has `"gpu": "metal"` or `false`)
+
+## Linux CUDA build speed (GHA)
+
+`build-linux-cuda-x64` optimizes for CI time:
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| CUDA arches | `86-real;89-real` | ~2–5× fewer NVCC units than `75;80;86;89;90` |
+| ccache | on | Faster re-runs / same-tag rebuilds |
+| Target | `llama-server` only | Avoid compiling unused tools |
+| Toolkit cache | `use-github-cache: true` | Skip re-downloading CUDA |
+
+Trade-off: drops older GPUs (e.g. Turing `75`) from the **GHA** linux-x64-cuda zip. Expand `CMAKE_CUDA_ARCHITECTURES` if you need broader cards. DGX Spark stays on-device (`121`).
+
