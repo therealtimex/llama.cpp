@@ -1,0 +1,413 @@
+# RealTimeX: promote a pinned ggml-org/llama.cpp tag into managed llama-server zips.
+#
+# Hybrid strategy:
+#   - Mirror/repack official GitHub release packs (mac/win/linux CPU+Vulkan, win CUDA)
+#   - Self-build gaps (linux CUDA x64, optional linux CUDA arm64)
+#   - Inject RealTimeX _nlcBuildMetadata.json compatible with the app downloader
+#
+# Usage:
+#   gh workflow run realtimex-promote-runtime.yml -f llama_cpp_tag=b10012 -f publish=true
+#
+name: RealTimeX Promote Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_cpp_tag:
+        description: "ggml-org/llama.cpp release tag (e.g. b10012)"
+        required: true
+        type: string
+      publish:
+        description: "Create GitHub release realtimex-<tag> and upload assets"
+        required: false
+        type: boolean
+        default: false
+      build_linux_cuda_x64:
+        description: "Build linux-x64-cuda (self-build gap)"
+        required: false
+        type: boolean
+        default: true
+      build_linux_cuda_arm64:
+        description: "Build linux-arm64-cuda (optional / DGX-style)"
+        required: false
+        type: boolean
+        default: false
+      fail_on_missing_official:
+        description: "Fail the whole matrix if an official upstream asset is missing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: realtimex-promote-runtime-${{ github.event.inputs.llama_cpp_tag }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  REALTIMEX_SCRIPTS: realtimex/scripts
+
+jobs:
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.normalize.outputs.tag }}
+      release_tag: ${{ steps.normalize.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - name: Normalize / validate tag
+        id: normalize
+        run: |
+          set -euo pipefail
+          raw="${{ github.event.inputs.llama_cpp_tag }}"
+          tag="$(echo "$raw" | tr -d '[:space:]')"
+          if [[ ! "$tag" =~ ^b[0-9]+$ ]]; then
+            echo "Invalid tag: $tag (expected bNNNN)"
+            exit 1
+          fi
+          # Ensure the upstream release exists
+          code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${tag}" || true)"
+          if [[ "$code" != "200" ]]; then
+            echo "Upstream release not found: ggml-org/llama.cpp@${tag} (HTTP ${code})"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=realtimex-${tag}" >> "$GITHUB_OUTPUT"
+          echo "Promoting llama.cpp ${tag} → release realtimex-${tag}"
+
+  repack-official:
+    name: Repack ${{ matrix.id }}
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event.inputs.fail_on_missing_official != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: darwin-arm64
+          - id: darwin-x64
+          - id: linux-x64
+          - id: linux-arm64
+          - id: linux-x64-vulkan
+          - id: linux-arm64-vulkan
+          - id: win32-x64
+          - id: win32-arm64
+          - id: win32-x64-cuda
+          - id: win32-x64-vulkan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Repack official asset
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          MATRIX_ID: ${{ matrix.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p realtimex-dist realtimex-work
+          python3 "${REALTIMEX_SCRIPTS}/repack_official_runtime.py" \
+            --tag "${TAG}" \
+            --matrix-id "${MATRIX_ID}" \
+            --work-dir realtimex-work \
+            --out-dir realtimex-dist
+
+      - name: Upload dist artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.id }}
+          path: realtimex-dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  build-linux-cuda-x64:
+    name: Build linux-x64-cuda
+    needs: validate-tag
+    if: github.event.inputs.build_linux_cuda_x64 == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ needs.validate-tag.outputs.tag }}
+          path: llama.cpp
+          fetch-depth: 1
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+          path: packaging
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: "12.4.0"
+          method: network
+
+      - name: Configure & build llama-server
+        working-directory: llama.cpp
+        run: |
+          set -euo pipefail
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF
+          cmake --build build --config Release --target llama-server -j"$(nproc)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Package runtime zip
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p realtimex-dist
+          python3 packaging/realtimex/scripts/package_built_runtime.py \
+            --tag "${TAG}" \
+            --matrix-id linux-x64-cuda \
+            --build-dir llama.cpp/build \
+            --out-dir realtimex-dist
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-linux-x64-cuda
+          path: realtimex-dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  build-linux-cuda-arm64:
+    name: Build linux-arm64-cuda
+    needs: validate-tag
+    if: github.event.inputs.build_linux_cuda_arm64 == 'true'
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ needs.validate-tag.outputs.tag }}
+          path: llama.cpp
+          fetch-depth: 1
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+          path: packaging
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Install CUDA toolkit (arm64)
+        # Network toolkit action may not support all arm hosts; fall back to distro packages when needed.
+        continue-on-error: true
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: "12.4.0"
+          method: network
+
+      - name: Ensure nvcc available
+        run: |
+          set -euo pipefail
+          if command -v nvcc >/dev/null 2>&1; then
+            nvcc --version
+            exit 0
+          fi
+          # Best-effort distro install for arm runners
+          sudo apt-get install -y nvidia-cuda-toolkit || true
+          command -v nvcc
+          nvcc --version
+
+      - name: Configure & build llama-server
+        working-directory: llama.cpp
+        run: |
+          set -euo pipefail
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF
+          cmake --build build --config Release --target llama-server -j"$(nproc)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Package runtime zip
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p realtimex-dist
+          python3 packaging/realtimex/scripts/package_built_runtime.py \
+            --tag "${TAG}" \
+            --matrix-id linux-arm64-cuda \
+            --build-dir llama.cpp/build \
+            --out-dir realtimex-dist
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-linux-arm64-cuda
+          path: realtimex-dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-and-publish:
+    name: Assemble${{ github.event.inputs.publish == 'true' && ' & publish' || '' }}
+    needs:
+      - validate-tag
+      - repack-official
+      - build-linux-cuda-x64
+      - build-linux-cuda-arm64
+    # Run even when optional CUDA jobs are skipped; still require tag validation.
+    if: >-
+      always()
+      && !cancelled()
+      && needs.validate-tag.result == 'success'
+      && (
+        needs.repack-official.result == 'success'
+        || needs.repack-official.result == 'failure'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download all runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: runtime-*
+          merge-multiple: true
+
+      - name: Collect zips
+        id: collect
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p realtimex-dist
+          # download-artifact with merge-multiple may place files flat or nested
+          find artifacts -type f -name 'llama-server-*.zip' -print0 | while IFS= read -r -d '' f; do
+            cp -f "$f" realtimex-dist/
+          done
+          echo "Collected assets:"
+          ls -lh realtimex-dist || true
+          count="$(find realtimex-dist -type f -name 'llama-server-*.zip' | wc -l | tr -d ' ')"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          if [[ "$count" -lt 1 ]]; then
+            echo "No runtime zips collected"
+            exit 1
+          fi
+
+          python3 "${REALTIMEX_SCRIPTS}/build_runtime_manifest.py" \
+            --dist-dir realtimex-dist \
+            --tag "${RELEASE_TAG}" \
+            --llama-cpp-release "${TAG}" \
+            --out realtimex-dist/runtime-manifest.json
+
+          {
+            echo "## RealTimeX runtime promote"
+            echo ""
+            echo "- llama.cpp: \`${TAG}\`"
+            echo "- release tag: \`${RELEASE_TAG}\`"
+            echo "- assets: ${count}"
+            echo ""
+            echo '```json'
+            cat realtimex-dist/runtime-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
+          path: |
+            realtimex-dist/*.zip
+            realtimex-dist/runtime-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        if: github.event.inputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          # RealTimeX llama-server runtime \`${RELEASE_TAG}\`
+
+          Pinned upstream: [ggml-org/llama.cpp \`${TAG}\`](https://github.com/ggml-org/llama.cpp/releases/tag/${TAG})
+
+          ## Contents
+          Hybrid packaging for RealTimeX managed local LLM:
+          - Official packs repacked with \`_nlcBuildMetadata.json\`
+          - Self-built gaps (e.g. Linux CUDA) when enabled
+
+          See \`runtime-manifest.json\` for the full asset list and digests.
+
+          ## Asset naming
+          \`\`\`
+          llama-server-{platform}-{arch}[-{cuda|vulkan}]-${TAG}.zip
+          \`\`\`
+          Compatible with RealTimeX startup downloader and runtime status.
+          EOF
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; uploading/clobbering assets"
+            gh release upload "${RELEASE_TAG}" realtimex-dist/* --clobber
+            gh release edit "${RELEASE_TAG}" --notes-file "$notes"
+          else
+            gh release create "${RELEASE_TAG}" realtimex-dist/* \
+              --title "${RELEASE_TAG}" \
+              --notes-file "$notes"
+          fi
