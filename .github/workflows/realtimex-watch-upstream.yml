@@ -2,7 +2,8 @@
 #
 # Default policy:
 #   - Hourly cron detects newer upstream tags
-#   - Cron dispatches the full matrix and publishes only after it is complete
+#   - Cron publishes ready runtimes, then attaches linux-x64-cuda when built
+#   - Incomplete releases dispatch a missing-asset repair instead of a full rebuild
 #   - Manual dispatch can run an artifact-only dry run
 #
 name: RealTimeX Watch Upstream
@@ -30,7 +31,7 @@ on:
         type: boolean
         default: true
       force_tag:
-        description: "Optional: force check/promote this bNNNN (ignore comparison)"
+        description: "Optional: check this bNNNN instead of the latest upstream tag"
         required: false
         type: string
         default: ""
@@ -54,6 +55,9 @@ jobs:
       latestUpstream: ${{ steps.compare.outputs.latestUpstream }}
       latestPromoted: ${{ steps.compare.outputs.latestPromoted }}
       releaseTag: ${{ steps.compare.outputs.releaseTag }}
+      releaseComplete: ${{ steps.compare.outputs.releaseComplete }}
+      releaseState: ${{ steps.compare.outputs.releaseState }}
+      repairExisting: ${{ steps.compare.outputs.repairExisting }}
       should_dispatch: ${{ steps.decide.outputs.should_dispatch }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -78,23 +82,11 @@ jobs:
           FORCE="${FORCE_TAG}"
           FORCE="$(echo "$FORCE" | tr -d '[:space:]')"
 
-          if [[ -n "$FORCE" ]]; then
-            if [[ ! "$FORCE" =~ ^b[0-9]+$ ]]; then
-              echo "force_tag must look like b10012, got: $FORCE"
-              exit 1
-            fi
-            echo "updated=true" >> "$GITHUB_OUTPUT"
-            echo "latestUpstream=${FORCE}" >> "$GITHUB_OUTPUT"
-            echo "latestPromoted=" >> "$GITHUB_OUTPUT"
-            echo "releaseTag=realtimex-${FORCE}" >> "$GITHUB_OUTPUT"
-            echo "Forced tag: ${FORCE}"
-            exit 0
-          fi
-
           python3 realtimex/scripts/watch_upstream.py \
             --upstream-repo ggml-org/llama.cpp \
             --packaging-repo "${PACKAGING_REPO}" \
             --token "${GITHUB_TOKEN}" \
+            --force-tag "${FORCE}" \
             --github-output
 
       - name: Job summary
@@ -103,6 +95,9 @@ jobs:
           LATEST: ${{ steps.compare.outputs.latestUpstream }}
           PROMOTED: ${{ steps.compare.outputs.latestPromoted }}
           REL: ${{ steps.compare.outputs.releaseTag }}
+          COMPLETE: ${{ steps.compare.outputs.releaseComplete }}
+          RELEASE_STATE: ${{ steps.compare.outputs.releaseState }}
+          REPAIR: ${{ steps.compare.outputs.repairExisting }}
         run: |
           set -euo pipefail
           {
@@ -111,6 +106,9 @@ jobs:
             echo "- Upstream latest: \`${LATEST}\`"
             echo "- Promoted latest: \`${PROMOTED:-none}\`"
             echo "- Update needed: \`${UPDATED}\`"
+            echo "- Release complete: \`${COMPLETE}\`"
+            echo "- Release state: \`${RELEASE_STATE}\`"
+            echo "- Repair existing: \`${REPAIR}\`"
             echo "- Release tag would be: \`${REL}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -152,6 +150,7 @@ jobs:
           PUBLISH_REQUESTED: ${{ inputs.publish }}
           BUILD_CUDA_X64: ${{ inputs.build_linux_cuda_x64 }}
           BUILD_CUDA_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
+          REPAIR_EXISTING: ${{ needs.watch.outputs.repairExisting }}
         run: |
           set -euo pipefail
           # Normalize boolean-ish inputs to true/false strings for workflow inputs
@@ -160,25 +159,45 @@ jobs:
           else
             PUBLISH_FLAG=false
           fi
-          if [[ "${BUILD_CUDA_X64}" == "false" ]]; then
+          if [[ "${REPAIR_EXISTING}" == "true" ]]; then
+            CUDA_X64_FLAG=true
+            CUDA_ARM64_FLAG=false
+          elif [[ "${BUILD_CUDA_X64}" == "false" ]]; then
             CUDA_X64_FLAG=false
+            if [[ "${BUILD_CUDA_ARM64}" == "false" ]]; then
+              CUDA_ARM64_FLAG=false
+            else
+              CUDA_ARM64_FLAG=true
+            fi
           else
             CUDA_X64_FLAG=true
-          fi
-          if [[ "${BUILD_CUDA_ARM64}" == "false" ]]; then
-            CUDA_ARM64_FLAG=false
-          else
-            CUDA_ARM64_FLAG=true
+            if [[ "${BUILD_CUDA_ARM64}" == "false" ]]; then
+              CUDA_ARM64_FLAG=false
+            else
+              CUDA_ARM64_FLAG=true
+            fi
           fi
 
-          echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, linux_cuda_x64=${CUDA_X64_FLAG}, linux_cuda_arm64=${CUDA_ARM64_FLAG})"
+          active="$(gh run list --repo "${REPO}" \
+            --workflow realtimex-promote-runtime.yml --limit 20 \
+            --json displayTitle,status \
+            --jq ".[] | select(.displayTitle == \"RealTimeX Promote ${TAG}\" and .status != \"completed\") | .status")"
+          if [[ -n "$active" ]]; then
+            echo "Promote for ${TAG} is already ${active}; skipping duplicate dispatch"
+            echo "- Existing promote for \`${TAG}\` is \`${active}\`; duplicate dispatch skipped" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, repair=${REPAIR_EXISTING}, linux_cuda_x64=${CUDA_X64_FLAG}, linux_cuda_arm64=${CUDA_ARM64_FLAG})"
           gh workflow run realtimex-promote-runtime.yml \
             --repo "${REPO}" \
             -f "llama_cpp_tag=${TAG}" \
             -f "publish=${PUBLISH_FLAG}" \
             -f "build_linux_cuda_x64=${CUDA_X64_FLAG}" \
             -f "build_linux_cuda_arm64=${CUDA_ARM64_FLAG}" \
-            -f "fail_on_missing_official=false"
+            -f "fail_on_missing_official=false" \
+            -f "repair_existing=${REPAIR_EXISTING}"
 
           {
             echo "## Dispatched promote"
@@ -187,6 +206,7 @@ jobs:
             echo "- Publish: \`${PUBLISH_FLAG}\`"
             echo "- build_linux_cuda_x64: \`${CUDA_X64_FLAG}\`"
             echo "- build_linux_cuda_arm64: \`${CUDA_ARM64_FLAG}\`"
+            echo "- repair_existing: \`${REPAIR_EXISTING}\`"
             echo ""
             echo "Monitor: https://github.com/${REPO}/actions/workflows/realtimex-promote-runtime.yml"
           } >> "$GITHUB_STEP_SUMMARY"

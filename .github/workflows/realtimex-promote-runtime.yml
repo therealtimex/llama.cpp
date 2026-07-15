@@ -2,13 +2,14 @@
 #
 # Hybrid strategy:
 #   - Mirror/repack official GitHub release packs (mac/win/linux CPU+Vulkan, win CUDA)
-#   - Self-build gaps (linux CUDA x64, optional linux CUDA arm64)
+#   - Self-build gaps (linux CUDA ARM64 before publish, x64 attached later)
 #   - Inject RealTimeX _nlcBuildMetadata.json compatible with the app downloader
 #
 # Usage:
 #   gh workflow run realtimex-promote-runtime.yml -f llama_cpp_tag=b10012 -f publish=true
 #
 name: RealTimeX Promote Runtime
+run-name: RealTimeX Promote ${{ inputs.llama_cpp_tag }}
 
 on:
   workflow_dispatch:
@@ -23,7 +24,7 @@ on:
         type: boolean
         default: false
       build_linux_cuda_x64:
-        description: "Build linux-x64-cuda (self-build gap)"
+        description: "Build and incrementally attach linux-x64-cuda"
         required: false
         type: boolean
         default: true
@@ -34,6 +35,11 @@ on:
         default: true
       fail_on_missing_official:
         description: "Fail the whole matrix if an official upstream asset is missing"
+        required: false
+        type: boolean
+        default: false
+      repair_existing:
+        description: "Repair an existing assembling release (watcher use)"
         required: false
         type: boolean
         default: false
@@ -56,6 +62,10 @@ jobs:
     outputs:
       tag: ${{ steps.normalize.outputs.tag }}
       release_tag: ${{ steps.normalize.outputs.release_tag }}
+      release_exists: ${{ steps.inspect.outputs.release_exists }}
+      x64_exists: ${{ steps.inspect.outputs.x64_exists }}
+      release_complete: ${{ steps.inspect.outputs.release_complete }}
+      release_state: ${{ steps.inspect.outputs.release_state }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -88,21 +98,93 @@ jobs:
           echo "release_tag=realtimex-${tag}" >> "$GITHUB_OUTPUT"
           echo "Promoting llama.cpp ${tag} -> release realtimex-${tag}"
 
-      - name: Require full CUDA matrix for publish
+      - name: Inspect existing release
+        id: inspect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.normalize.outputs.release_tag }}
+          TAG: ${{ steps.normalize.outputs.tag }}
+          REPAIR_EXISTING: ${{ inputs.repair_existing }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          release_exists=false
+          x64_exists=false
+          release_complete=false
+          release_state=absent
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            release_exists=true
+            assets="$(gh release view "${RELEASE_TAG}" --repo "${REPO}" --json assets --jq '.assets[].name')"
+            printf '%s\n' "$assets" > existing-release-assets.txt
+            if grep -Fxq "llama-server-linux-x64-cuda-${TAG}.zip" <<< "$assets"; then
+              x64_exists=true
+            fi
+            mkdir -p existing-release
+            manifest_args=()
+            if grep -Fxq runtime-manifest.json <<< "$assets"; then
+              if ! gh release download "${RELEASE_TAG}" --repo "${REPO}" \
+                --pattern runtime-manifest.json --dir existing-release >/dev/null 2>&1; then
+                echo "Could not inspect runtime-manifest.json for ${RELEASE_TAG}; refusing to mutate it"
+                exit 1
+              fi
+              manifest_args+=(--manifest existing-release/runtime-manifest.json)
+            fi
+            python3 realtimex/scripts/runtime_release_state.py \
+              --tag "${TAG}" \
+              --assets-file existing-release-assets.txt \
+              "${manifest_args[@]}" \
+              --github-output > existing-release-state.json
+            release_state="$(jq -r '.state' existing-release-state.json)"
+            release_complete="$(jq -r '.complete' existing-release-state.json)"
+            if [[ "$release_state" == "invalid" ]]; then
+              echo "Existing release metadata is invalid; refusing automatic repair"
+              cat existing-release-state.json
+              exit 1
+            fi
+          fi
+
+          echo "release_exists=${release_exists}" >> "$GITHUB_OUTPUT"
+          echo "x64_exists=${x64_exists}" >> "$GITHUB_OUTPUT"
+          if [[ "$release_exists" != "true" ]]; then
+            echo "release_complete=${release_complete}" >> "$GITHUB_OUTPUT"
+            echo "release_state=${release_state}" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "$REPAIR_EXISTING" == "true" ]]; then
+            if [[ "$release_exists" != "true" ]]; then
+              echo "Repair requested, but ${RELEASE_TAG} does not exist"
+              exit 1
+            fi
+            if [[ "$release_complete" == "true" ]]; then
+              echo "Release ${RELEASE_TAG} became complete while the repair was queued; nothing to do"
+            fi
+          elif [[ "$PUBLISH" == "true" && "$release_exists" == "true" ]]; then
+            echo "Release ${RELEASE_TAG} already exists; use repair_existing for an assembling release"
+            exit 1
+          fi
+
+      - name: Validate publish matrix
         if: inputs.publish
         env:
           BUILD_CUDA_X64: ${{ inputs.build_linux_cuda_x64 }}
           BUILD_CUDA_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
+          REPAIR_EXISTING: ${{ inputs.repair_existing }}
         run: |
           set -euo pipefail
-          if [[ "$BUILD_CUDA_X64" != "true" || "$BUILD_CUDA_ARM64" != "true" ]]; then
-            echo "Publishing requires both Linux CUDA builds"
+          if [[ "$BUILD_CUDA_X64" != "true" ]]; then
+            echo "Publishing requires the Linux x64 CUDA build or repair check"
+            exit 1
+          fi
+          if [[ "$REPAIR_EXISTING" != "true" && "$BUILD_CUDA_ARM64" != "true" ]]; then
+            echo "Initial publication requires the Linux ARM64 CUDA build"
             exit 1
           fi
 
   repack-official:
     name: Repack ${{ matrix.id }}
     needs: validate-tag
+    if: ${{ ! inputs.repair_existing }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ inputs.fail_on_missing_official == false }}
     strategy:
@@ -156,7 +238,12 @@ jobs:
   build-linux-cuda-x64:
     name: Build linux-x64-cuda
     needs: validate-tag
-    if: inputs.build_linux_cuda_x64
+    if: >-
+      inputs.build_linux_cuda_x64
+      && (! inputs.repair_existing || needs.validate-tag.outputs.x64_exists != 'true')
+    continue-on-error: ${{ inputs.publish && ! inputs.repair_existing }}
+    outputs:
+      ready: ${{ steps.ready.outputs.ready }}
     runs-on: ubuntu-22.04
     # Multi-arch CUDA is the bottleneck; keep this job focused.
     timeout-minutes: 120
@@ -269,10 +356,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Mark x64 CUDA artifact ready
+        id: ready
+        run: echo "ready=true" >> "$GITHUB_OUTPUT"
+
   build-linux-cuda-arm64:
     name: Build linux-arm64-cuda
     needs: validate-tag
-    if: inputs.build_linux_cuda_arm64
+    if: inputs.build_linux_cuda_arm64 && ! inputs.repair_existing
     runs-on: [self-hosted, Linux, ARM64, dgx-spark, llama-cpp]
     timeout-minutes: 120
     steps:
@@ -381,24 +472,27 @@ jobs:
           compression-level: 0
           overwrite: true
 
-  assemble:
-    name: Assemble runtime artifacts
+  assemble-base:
+    name: Assemble base runtime artifacts
     needs:
       - validate-tag
       - repack-official
-      - build-linux-cuda-x64
       - build-linux-cuda-arm64
     outputs:
       complete: ${{ steps.collect.outputs.complete }}
-    # Run even when optional CUDA jobs are skipped; still require tag validation.
+      ready: ${{ steps.collect.outputs.ready }}
+    # Publish all ready platforms without waiting for the slow x64 CUDA build.
     if: >-
       always()
       && !cancelled()
+      && inputs.publish
+      && ! inputs.repair_existing
       && needs.validate-tag.result == 'success'
       && (
         needs.repack-official.result == 'success'
         || needs.repack-official.result == 'failure'
       )
+      && needs.build-linux-cuda-arm64.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -424,8 +518,6 @@ jobs:
         env:
           TAG: ${{ needs.validate-tag.outputs.tag }}
           RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
-          BUILD_X64: ${{ inputs.build_linux_cuda_x64 }}
-          BUILD_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
         run: |
           set -euo pipefail
           mkdir -p realtimex-dist
@@ -449,14 +541,10 @@ jobs:
             --llama-cpp-release "${TAG}"
             --out realtimex-dist/runtime-manifest.json
             --require-official
+            --require-matrix-id linux-arm64-cuda
+            --allow-missing-matrix-id linux-x64-cuda
             --github-output
           )
-          if [[ "$BUILD_X64" == "true" ]]; then
-            manifest_args+=(--require-matrix-id linux-x64-cuda)
-          fi
-          if [[ "$BUILD_ARM64" == "true" ]]; then
-            manifest_args+=(--require-matrix-id linux-arm64-cuda)
-          fi
           python3 "${manifest_args[@]}"
 
           {
@@ -474,53 +562,44 @@ jobs:
       - name: Report runtime completeness
         env:
           COMPLETE: ${{ steps.collect.outputs.complete }}
+          READY: ${{ steps.collect.outputs.ready }}
           EXPECTED_COUNT: ${{ steps.collect.outputs.expectedCount }}
           MISSING_COUNT: ${{ steps.collect.outputs.missingCount }}
+          BLOCKING_MISSING_COUNT: ${{ steps.collect.outputs.blockingMissingCount }}
         run: |
           set -euo pipefail
-          echo "- Complete runtime set: \`${COMPLETE}\` (${EXPECTED_COUNT} expected, ${MISSING_COUNT} missing)" \
+          echo "- Base ready: \`${READY}\`; complete: \`${COMPLETE}\` (${EXPECTED_COUNT} expected, ${MISSING_COUNT} missing, ${BLOCKING_MISSING_COUNT} blocking)" \
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload combined dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
+          name: realtimex-runtime-base-${{ needs.validate-tag.outputs.tag }}
           path: |
             realtimex-dist/*.zip
             realtimex-dist/runtime-manifest.json
           if-no-files-found: error
           retention-days: 7
 
-      - name: Reject incomplete publish request
-        if: inputs.publish && steps.collect.outputs.complete != 'true'
+      - name: Reject base publication with blocking gaps
+        if: steps.collect.outputs.ready != 'true'
         run: |
-          echo "Publishing requires the complete expected runtime set"
+          echo "Base publication is missing assets other than late linux-x64-cuda"
           exit 1
 
-  publish:
-    name: Publish ${{ needs.validate-tag.outputs.release_tag }}
+  publish-base:
+    name: Publish base ${{ needs.validate-tag.outputs.release_tag }}
     needs:
       - validate-tag
-      - repack-official
-      - build-linux-cuda-x64
-      - build-linux-cuda-arm64
-      - assemble
+      - assemble-base
     if: >-
       always()
       && !cancelled()
       && inputs.publish
+      && ! inputs.repair_existing
       && needs.validate-tag.result == 'success'
-      && needs.repack-official.result == 'success'
-      && needs.assemble.result == 'success'
-      && needs.assemble.outputs.complete == 'true'
-      && (
-        inputs.build_linux_cuda_x64 == false
-        || needs.build-linux-cuda-x64.result == 'success'
-      )
-      && (
-        inputs.build_linux_cuda_arm64 == false
-        || needs.build-linux-cuda-arm64.result == 'success'
-      )
+      && needs.assemble-base.result == 'success'
+      && needs.assemble-base.outputs.ready == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -528,10 +607,10 @@ jobs:
       - name: Download combined dist
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
+          name: realtimex-runtime-base-${{ needs.validate-tag.outputs.tag }}
           path: realtimex-dist
 
-      - name: Publish immutable GitHub release
+      - name: Publish base GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -540,11 +619,19 @@ jobs:
           TARGET_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          complete="$(jq -r '.complete' realtimex-dist/runtime-manifest.json)"
+          if [[ "$complete" == "true" ]]; then
+            status="complete"
+          else
+            status="assembling (linux-x64-cuda pending)"
+          fi
           notes="$(mktemp)"
           cat > "$notes" <<EOF
           # RealTimeX llama-server runtime \`${RELEASE_TAG}\`
 
           Pinned upstream: [ggml-org/llama.cpp \`${TAG}\`](https://github.com/ggml-org/llama.cpp/releases/tag/${TAG})
+
+          Status: **${status}**
 
           ## Contents
           Hybrid packaging for RealTimeX managed local LLM:
@@ -560,13 +647,241 @@ jobs:
           Compatible with RealTimeX startup downloader and runtime status.
           EOF
 
-          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} already exists; refusing to mutate it"
-            exit 1
-          fi
-
           gh release create "${RELEASE_TAG}" realtimex-dist/* \
             --repo "${REPO}" \
             --target "${TARGET_SHA}" \
             --title "${RELEASE_TAG}" \
             --notes-file "$notes"
+
+  finalize-x64-cuda:
+    name: Finalize linux-x64-cuda
+    needs:
+      - validate-tag
+      - build-linux-cuda-x64
+      - publish-base
+    if: >-
+      always()
+      && !cancelled()
+      && inputs.publish
+      && needs.validate-tag.result == 'success'
+      && needs.validate-tag.outputs.release_complete != 'true'
+      && (
+        (inputs.repair_existing && needs.publish-base.result == 'skipped')
+        || (! inputs.repair_existing && needs.publish-base.result == 'success')
+      )
+      && (
+        needs.validate-tag.outputs.x64_exists == 'true'
+        || needs.build-linux-cuda-x64.outputs.ready == 'true'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download newly built x64 CUDA artifact
+        if: needs.validate-tag.outputs.x64_exists != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-linux-x64-cuda
+          path: built-x64
+
+      - name: Seal complete release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_assets="$(gh release view "${RELEASE_TAG}" --repo "${REPO}" --json assets --jq '.assets[].name')"
+          printf '%s\n' "$release_assets" > live-release-assets.txt
+          mkdir -p live-release
+          live_manifest_args=()
+          if grep -Fxq runtime-manifest.json <<< "$release_assets"; then
+            if ! gh release download "${RELEASE_TAG}" --repo "${REPO}" \
+              --pattern runtime-manifest.json --dir live-release >/dev/null 2>&1; then
+              echo "Could not re-check runtime-manifest.json; refusing to mutate ${RELEASE_TAG}"
+              exit 1
+            fi
+            live_manifest_args+=(--manifest live-release/runtime-manifest.json)
+          fi
+          python3 "${REALTIMEX_SCRIPTS}/runtime_release_state.py" \
+            --tag "${TAG}" \
+            --assets-file live-release-assets.txt \
+            "${live_manifest_args[@]}" > live-release-state.json
+          live_state="$(jq -r '.state' live-release-state.json)"
+          if [[ "$live_state" == "invalid" ]]; then
+            echo "Live release metadata is invalid; refusing automatic mutation"
+            cat live-release-state.json
+            exit 1
+          fi
+          if [[ "$live_state" == "complete" ]]; then
+            echo "Release ${RELEASE_TAG} is already complete and immutable" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          mkdir -p realtimex-dist
+          gh release download "${RELEASE_TAG}" --repo "${REPO}" \
+            --pattern 'llama-server-*.zip' --dir realtimex-dist
+
+          x64_asset="llama-server-linux-x64-cuda-${TAG}.zip"
+          if grep -Fxq "$x64_asset" <<< "$release_assets"; then
+            x64_uploaded=true
+          else
+            x64_uploaded=false
+          fi
+          if [[ "$x64_uploaded" != "true" ]]; then
+            cp "built-x64/${x64_asset}" "realtimex-dist/${x64_asset}"
+          fi
+          test -f "realtimex-dist/${x64_asset}"
+
+          python3 "${REALTIMEX_SCRIPTS}/build_runtime_manifest.py" \
+            --dist-dir realtimex-dist \
+            --tag "${RELEASE_TAG}" \
+            --llama-cpp-release "${TAG}" \
+            --out realtimex-dist/runtime-manifest.json \
+            --require-official \
+            --require-matrix-id linux-arm64-cuda \
+            --require-matrix-id linux-x64-cuda \
+            --github-output
+          if [[ "$(jq -r '.complete' realtimex-dist/runtime-manifest.json)" != "true" ]]; then
+            echo "Refusing to seal a release without all 12 runtime assets"
+            exit 1
+          fi
+
+          if [[ "$x64_uploaded" != "true" ]]; then
+            gh release upload "${RELEASE_TAG}" "realtimex-dist/${x64_asset}" \
+              --repo "${REPO}"
+          fi
+          # The manifest is replaced last, so complete=true never points at a missing ZIP.
+          gh release upload "${RELEASE_TAG}" realtimex-dist/runtime-manifest.json \
+            --repo "${REPO}" --clobber
+
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          # RealTimeX llama-server runtime \`${RELEASE_TAG}\`
+
+          Pinned upstream: [ggml-org/llama.cpp \`${TAG}\`](https://github.com/ggml-org/llama.cpp/releases/tag/${TAG})
+
+          Status: **complete**
+
+          ## Contents
+          Hybrid packaging for RealTimeX managed local LLM:
+          - Official packs repacked with \`_nlcBuildMetadata.json\`
+          - Self-built Linux CUDA runtimes
+
+          See \`runtime-manifest.json\` for the full asset list and digests.
+
+          ## Asset naming
+          \`\`\`
+          llama-server-{platform}-{arch}[-{cuda|vulkan}]-${TAG}.zip
+          \`\`\`
+          Compatible with RealTimeX startup downloader and runtime status.
+          EOF
+          if ! gh release edit "${RELEASE_TAG}" --repo "${REPO}" --notes-file "$notes"; then
+            echo "Warning: release is complete, but its notes could not be refreshed"
+          fi
+
+          echo "Release ${RELEASE_TAG} is complete and immutable" >> "$GITHUB_STEP_SUMMARY"
+
+  assemble-dry-run:
+    name: Assemble dry-run artifacts
+    needs:
+      - validate-tag
+      - repack-official
+      - build-linux-cuda-x64
+      - build-linux-cuda-arm64
+    if: >-
+      always()
+      && !cancelled()
+      && ! inputs.publish
+      && ! inputs.repair_existing
+      && needs.validate-tag.result == 'success'
+      && (
+        needs.repack-official.result == 'success'
+        || needs.repack-official.result == 'failure'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download all runtime artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: runtime-*
+          merge-multiple: true
+
+      - name: Collect dry-run zips
+        id: collect
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
+          BUILD_X64: ${{ inputs.build_linux_cuda_x64 }}
+          BUILD_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p realtimex-dist
+          find artifacts -type f -name 'llama-server-*.zip' -print0 | while IFS= read -r -d '' f; do
+            cp -f "$f" realtimex-dist/
+          done
+          count="$(find realtimex-dist -type f -name 'llama-server-*.zip' | wc -l | tr -d ' ')"
+          if [[ "$count" -lt 1 ]]; then
+            echo "No runtime zips collected"
+            exit 1
+          fi
+
+          manifest_args=(
+            "${REALTIMEX_SCRIPTS}/build_runtime_manifest.py"
+            --dist-dir realtimex-dist
+            --tag "${RELEASE_TAG}"
+            --llama-cpp-release "${TAG}"
+            --out realtimex-dist/runtime-manifest.json
+            --require-official
+            --github-output
+          )
+          if [[ "$BUILD_X64" == "true" ]]; then
+            manifest_args+=(--require-matrix-id linux-x64-cuda)
+          fi
+          if [[ "$BUILD_ARM64" == "true" ]]; then
+            manifest_args+=(--require-matrix-id linux-arm64-cuda)
+          fi
+          python3 "${manifest_args[@]}"
+
+      - name: Report dry-run completeness
+        env:
+          COMPLETE: ${{ steps.collect.outputs.complete }}
+          EXPECTED_COUNT: ${{ steps.collect.outputs.expectedCount }}
+          MISSING_COUNT: ${{ steps.collect.outputs.missingCount }}
+        run: |
+          echo "Dry run complete=${COMPLETE}; expected=${EXPECTED_COUNT}; missing=${MISSING_COUNT}" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined dry-run dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
+          path: |
+            realtimex-dist/*.zip
+            realtimex-dist/runtime-manifest.json
+          if-no-files-found: error
+          retention-days: 7

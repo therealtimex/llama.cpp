@@ -636,6 +636,9 @@ def write_runtime_manifest(
     tag: str,
     llama_cpp_release: str,
     assets: list[dict[str, Any]],
+    complete: Optional[bool] = None,
+    expected_asset_names: Optional[list[str]] = None,
+    missing_asset_names: Optional[list[str]] = None,
 ) -> None:
     payload = {
         "tag": tag,
@@ -644,5 +647,14 @@ def write_runtime_manifest(
         "publishedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "assets": assets,
     }
+    if complete is not None:
+        payload.update(
+            {
+                "status": "complete" if complete else "assembling",
+                "complete": complete,
+                "expectedAssetNames": expected_asset_names or [],
+                "missingAssetNames": missing_asset_names or [],
+            }
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

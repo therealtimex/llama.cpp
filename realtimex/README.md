@@ -48,17 +48,21 @@ gh workflow run realtimex-promote-runtime.yml \
   -f build_linux_cuda_arm64=true
 ```
 
-Publishing requires all 12 runtime variants, including both Linux CUDA self-builds. The CUDA inputs may be disabled only for artifact-only dry runs. Published `realtimex-b*` releases are immutable; use a new tag rather than rerunning a published release.
+Initial publication requires the 10 official variants plus the DGX-built Linux ARM64 CUDA runtime. The Linux x64 CUDA build runs in parallel and does not block the release: an initial 11-asset manifest is published with `status: assembling`, then the x64 CUDA ZIP is uploaded and the manifest is replaced last with `status: complete` and all 12 digests. An assembling release may only gain its missing asset and updated manifest; a complete `realtimex-b*` release is immutable.
+
+If the x64 CUDA build fails, the other runtimes remain published. The hourly watcher detects the incomplete manifest and dispatches an x64-only repair instead of rebuilding the official and ARM64 matrix. The CUDA inputs may be disabled only for artifact-only dry runs.
+
+Completeness is checked against `expectedAssetNames` in the manifest and both the published ZIPs and manifest asset records. Legacy releases use their frozen 12-asset matrix. If the manifest cannot be read or validated, automation reports an unknown state and refuses to mutate the release.
 
 ### Watch upstream (from node-llama-cpp "Watch llama.cpp")
 
 [`.github/workflows/realtimex-watch-upstream.yml`](../.github/workflows/realtimex-watch-upstream.yml)
 
-Polls `ggml-org/llama.cpp` for newer `b*` tags than the latest `realtimex-b*` release.
+Polls `ggml-org/llama.cpp` for newer `b*` tags and verifies that the matching latest `realtimex-b*` release is complete.
 
 | Mode | Behavior |
 |------|----------|
-| Cron (hourly) | Build the full matrix for a new tag and publish after all 12 variants pass |
+| Cron (hourly) | Publish 11 ready variants for a new tag, attach x64 CUDA when ready, or repair an incomplete release |
 | Manual | Can force tag, toggle promote/publish/cuda |
 
 ```bash

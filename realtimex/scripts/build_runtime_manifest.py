@@ -73,6 +73,15 @@ def parse_args() -> argparse.Namespace:
         help="Additional matrix row required for completeness (repeatable)",
     )
     p.add_argument(
+        "--allow-missing-matrix-id",
+        action="append",
+        default=[],
+        help=(
+            "Additional matrix row expected in the final release but allowed to be "
+            "missing from this publication phase (repeatable)"
+        ),
+    )
+    p.add_argument(
         "--github-output",
         action="store_true",
         help="Write complete/expectedCount/missingCount to GITHUB_OUTPUT",
@@ -111,26 +120,41 @@ def main() -> None:
             }
         )
 
+    expected_names = expected_asset_names(
+        llama_release,
+        require_official=args.require_official,
+        require_matrix_ids=args.require_matrix_id + args.allow_missing_matrix_id,
+    )
+    missing_names = missing_required_asset_names(assets, expected_names)
+    complete = not missing_names
+    allowed_missing_names = set(
+        expected_asset_names(
+            llama_release,
+            require_official=False,
+            require_matrix_ids=args.allow_missing_matrix_id,
+        )
+    )
+    blocking_missing_names = [
+        name for name in missing_names if name not in allowed_missing_names
+    ]
+    ready = not blocking_missing_names
+
     write_runtime_manifest(
         Path(args.out),
         tag=args.tag,
         llama_cpp_release=llama_release,
         assets=assets,
+        complete=complete,
+        expected_asset_names=expected_names,
+        missing_asset_names=missing_names,
     )
-
-    expected_names = expected_asset_names(
-        llama_release,
-        require_official=args.require_official,
-        require_matrix_ids=args.require_matrix_id,
-    )
-    missing_names = missing_required_asset_names(assets, expected_names)
-    complete = not missing_names
 
     print(f"wrote {args.out} with {len(assets)} assets", flush=True)
     print(json.dumps(assets, indent=2))
     print(
         f"completeness: complete={str(complete).lower()} "
-        f"expected={len(expected_names)} missing={len(missing_names)}",
+        f"ready={str(ready).lower()} expected={len(expected_names)} "
+        f"missing={len(missing_names)} blocking={len(blocking_missing_names)}",
         flush=True,
     )
     for name in missing_names:
@@ -142,8 +166,10 @@ def main() -> None:
             raise SystemExit("GITHUB_OUTPUT is required with --github-output")
         with open(output_path, "a", encoding="utf-8") as fh:
             fh.write(f"complete={'true' if complete else 'false'}\n")
+            fh.write(f"ready={'true' if ready else 'false'}\n")
             fh.write(f"expectedCount={len(expected_names)}\n")
             fh.write(f"missingCount={len(missing_names)}\n")
+            fh.write(f"blockingMissingCount={len(blocking_missing_names)}\n")
 
 
 if __name__ == "__main__":
