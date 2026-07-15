@@ -1,0 +1,178 @@
+# Watch ggml-org/llama.cpp for new b* tags and optionally dispatch promote.
+#
+# Default policy (safe):
+#   - Cron / dispatch detects newer upstream tags
+#   - Does NOT publish releases automatically
+#   - Optional dry-run promote (artifacts only) when dispatch_promote=true
+#
+# DGX Spark arm64-cuda is intentionally NOT built here (on-device / manual).
+#
+name: RealTimeX Watch Upstream
+
+on:
+  schedule:
+    # Every 3 hours (offset to avoid top-of-hour pileups)
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      dispatch_promote:
+        description: "If a new tag is found, dispatch realtimex-promote-runtime (dry-run unless publish=true)"
+        type: boolean
+        default: true
+      publish:
+        description: "When dispatching promote, also publish realtimex-bNNNN (prefer false)"
+        type: boolean
+        default: false
+      build_linux_cuda_x64:
+        description: "When dispatching promote, build linux-x64-cuda"
+        type: boolean
+        default: true
+      force_tag:
+        description: "Optional: force check/promote this bNNNN (ignore comparison)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: realtimex-watch-upstream
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  watch:
+    name: Check upstream llama.cpp
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.compare.outputs.updated }}
+      latestUpstream: ${{ steps.compare.outputs.latestUpstream }}
+      latestPromoted: ${{ steps.compare.outputs.latestPromoted }}
+      releaseTag: ${{ steps.compare.outputs.releaseTag }}
+      should_dispatch: ${{ steps.decide.outputs.should_dispatch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            realtimex
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compare upstream vs promoted
+        id: compare
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FORCE="${{ github.event.inputs.force_tag || '' }}"
+          FORCE="$(echo "$FORCE" | tr -d '[:space:]')"
+
+          if [[ -n "$FORCE" ]]; then
+            if [[ ! "$FORCE" =~ ^b[0-9]+$ ]]; then
+              echo "force_tag must look like b10012, got: $FORCE"
+              exit 1
+            fi
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "latestUpstream=${FORCE}" >> "$GITHUB_OUTPUT"
+            echo "latestPromoted=" >> "$GITHUB_OUTPUT"
+            echo "releaseTag=realtimex-${FORCE}" >> "$GITHUB_OUTPUT"
+            echo "Forced tag: ${FORCE}"
+            exit 0
+          fi
+
+          python3 realtimex/scripts/watch_upstream.py \
+            --upstream-repo ggml-org/llama.cpp \
+            --packaging-repo "${{ github.repository }}" \
+            --token "${GITHUB_TOKEN}" \
+            --github-output
+
+      - name: Job summary
+        env:
+          UPDATED: ${{ steps.compare.outputs.updated }}
+          LATEST: ${{ steps.compare.outputs.latestUpstream }}
+          PROMOTED: ${{ steps.compare.outputs.latestPromoted }}
+          REL: ${{ steps.compare.outputs.releaseTag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## RealTimeX watch upstream"
+            echo ""
+            echo "- Upstream latest: \`${LATEST}\`"
+            echo "- Promoted latest: \`${PROMOTED:-none}\`"
+            echo "- Update needed: \`${UPDATED}\`"
+            echo "- Release tag would be: \`${REL}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide dispatch
+        id: decide
+        run: |
+          set -euo pipefail
+          UPDATED="${{ steps.compare.outputs.updated }}"
+          # schedule defaults: detect only (no promote) unless inputs present
+          # workflow_dispatch: honor inputs (default dispatch_promote=true)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            WANT="${{ github.event.inputs.dispatch_promote }}"
+          else
+            # Cron: auto dry-run promote when behind (safe: publish stays false)
+            WANT="true"
+          fi
+
+          if [[ "$UPDATED" == "true" && "$WANT" == "true" ]]; then
+            echo "should_dispatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  dispatch-promote:
+    name: Dispatch promote ${{ needs.watch.outputs.latestUpstream }}
+    needs: watch
+    if: needs.watch.outputs.should_dispatch == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch realtimex-promote-runtime
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.watch.outputs.latestUpstream }}
+          # publish only when manually requested; cron always false
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish || 'false' }}
+          BUILD_CUDA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_linux_cuda_x64 || 'true' }}
+        run: |
+          set -euo pipefail
+          # Normalize boolean-ish inputs to true/false strings for workflow inputs
+          if [[ "${PUBLISH}" == "true" ]]; then
+            PUBLISH_FLAG=true
+          else
+            PUBLISH_FLAG=false
+          fi
+          if [[ "${BUILD_CUDA}" == "false" ]]; then
+            CUDA_FLAG=false
+          else
+            CUDA_FLAG=true
+          fi
+
+          echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, linux_cuda_x64=${CUDA_FLAG})"
+          gh workflow run realtimex-promote-runtime.yml \
+            --repo "${{ github.repository }}" \
+            -f "llama_cpp_tag=${TAG}" \
+            -f "publish=${PUBLISH_FLAG}" \
+            -f "build_linux_cuda_x64=${CUDA_FLAG}" \
+            -f "build_linux_cuda_arm64=false" \
+            -f "fail_on_missing_official=false"
+
+          {
+            echo "## Dispatched promote"
+            echo ""
+            echo "- Tag: \`${TAG}\`"
+            echo "- Publish: \`${PUBLISH_FLAG}\`"
+            echo "- build_linux_cuda_x64: \`${CUDA_FLAG}\`"
+            echo "- build_linux_arm64_cuda: \`false\` (use DGX Spark on-device)"
+            echo ""
+            echo "Monitor: https://github.com/${{ github.repository }}/actions/workflows/realtimex-promote-runtime.yml"
+          } >> "$GITHUB_STEP_SUMMARY"

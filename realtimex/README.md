@@ -18,14 +18,17 @@ Official llama.cpp release tarballs do **not** include that metadata. This tree 
 
 This fork is a **RealTimeX packaging surface**, not upstream CI.
 
-Only workflow kept:
+Workflows kept:
 
-- `.github/workflows/realtimex-promote-runtime.yml`
+- `.github/workflows/realtimex-promote-runtime.yml` — build/repack/publish runtimes
+- `.github/workflows/realtimex-watch-upstream.yml` — watch `ggml-org/llama.cpp` for new `b*` tags
 
 All other upstream Actions (build matrices, release, lint bots, UI, Docker, etc.) are removed so pushes/syncs do not burn CI. Re-evaluate after merging from `ggml-org/llama.cpp` if workflows are restored.
 
 
-## Workflow
+## Workflows
+
+### Promote runtime
 
 [`.github/workflows/realtimex-promote-runtime.yml`](../.github/workflows/realtimex-promote-runtime.yml)
 
@@ -45,6 +48,40 @@ gh workflow run realtimex-promote-runtime.yml \
   -f build_linux_cuda_arm64=false
 ```
 
+### Watch upstream (from node-llama-cpp “Watch llama.cpp”)
+
+[`.github/workflows/realtimex-watch-upstream.yml`](../.github/workflows/realtimex-watch-upstream.yml)
+
+Polls `ggml-org/llama.cpp` for newer `b*` tags than the latest `realtimex-b*` release.
+
+| Mode | Behavior |
+|------|----------|
+| Cron (every 3h) | If behind → dispatch **promote dry-run** (`publish=false`) |
+| Manual | Can force tag, toggle promote/publish/cuda |
+
+**Not automated here:** DGX Spark `linux-arm64-cuda` (build on-device, upload to the release).
+
+```bash
+# Check + dry-run promote if behind
+gh workflow run realtimex-watch-upstream.yml \
+  --repo therealtimex/llama.cpp \
+  -f dispatch_promote=true \
+  -f publish=false
+
+# Force a specific tag dry-run
+gh workflow run realtimex-watch-upstream.yml \
+  --repo therealtimex/llama.cpp \
+  -f force_tag=b10012 \
+  -f dispatch_promote=true \
+  -f publish=false
+```
+
+Local compare:
+
+```bash
+python3 realtimex/scripts/watch_upstream.py --json
+```
+
 ## Scripts
 
 | Script | Purpose |
@@ -56,6 +93,7 @@ gh workflow run realtimex-promote-runtime.yml \
 | `scripts/package_built_runtime.py` | Package local cmake `llama-server` build |
 | `scripts/build_runtime_manifest.py` | Emit `runtime-manifest.json` |
 | `scripts/list_matrix.py` | Dump packaging matrix |
+| `scripts/watch_upstream.py` | Compare upstream `b*` vs `realtimex-b*` releases |
 
 ### Local repack example
 
