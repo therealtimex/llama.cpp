@@ -14,6 +14,17 @@ RealTimeX no longer needs Node native addons for local LLM. It still expects:
 
 Official llama.cpp release tarballs do **not** include that metadata. This tree repacks (or self-builds) them.
 
+## GitHub Actions on this fork
+
+This fork is a **RealTimeX packaging surface**, not upstream CI.
+
+Only workflow kept:
+
+- `.github/workflows/realtimex-promote-runtime.yml`
+
+All other upstream Actions (build matrices, release, lint bots, UI, Docker, etc.) are removed so pushes/syncs do not burn CI. Re-evaluate after merging from `ggml-org/llama.cpp` if workflows are restored.
+
+
 ## Workflow
 
 [`.github/workflows/realtimex-promote-runtime.yml`](../.github/workflows/realtimex-promote-runtime.yml)
