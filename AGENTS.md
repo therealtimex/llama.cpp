@@ -1,11 +1,28 @@
 # Instructions for llama.cpp
 
+## RealTimeX Fork Scope
+
+This checkout is the RealTimeX-owned `therealtimex/llama.cpp` fork. Its purpose is to build and package `llama-server` for the RealTimeX Local LLM provider.
+
+For RealTimeX-only work, including `realtimex/**`, `.github/workflows/realtimex-*`, and fork-specific documentation or configuration:
+
+- Agent-assisted implementation is allowed when the user has reviewed the plan or explicitly requested the change.
+- An agent may write a concise commit message and create a commit after explicit user approval. Add `Assisted-by: <assistant name>` and do not use `Co-authored-by:`.
+- An agent may push after explicit user approval only when `origin` resolves to `therealtimex/llama.cpp`.
+- An agent may monitor RealTimeX fork workflows after an approved push.
+- Never push to the `ggml-org/llama.cpp` upstream remote or create an upstream pull request.
+- Never create pull requests, issue comments, review responses, or other public communications on the user's behalf.
+
+The upstream contribution rules below continue to apply to any change intended for `ggml-org/llama.cpp`. This RealTimeX scope takes precedence when a later general rule conflicts with explicitly approved RealTimeX-only work.
+
+---
+
 > [!IMPORTANT]
-> This project does **not** accept pull requests that are fully or predominantly AI-generated. AI tools may be utilized solely in an assistive capacity.
+> The upstream project does **not** accept pull requests that are fully or predominantly AI-generated. AI tools may be utilized solely in an assistive capacity for upstream contributions.
 >
 > Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-AI assistance is permissible only when the majority of the code is authored by a human contributor, with AI employed exclusively for corrections or to expand on verbose modifications that the contributor has already conceptualized.
+For upstream contributions, AI assistance is permissible only when the majority of the code is authored by a human contributor, with AI employed exclusively for corrections or to expand on verbose modifications that the contributor has already conceptualized.
 
 ---
 
@@ -33,19 +50,19 @@ AI-generated code is acceptable if you (1) fully understand it, (2) can debug it
 
 **Disclose** when AI meaningfully contributed (follow the pull request template). No disclosure needed for trivial autocomplete.
 
-### Prohibited AI Usage (results in immediate PR closure)
+### Prohibited AI Usage for Upstream Submissions (results in immediate PR closure)
 
 - AI-written PR descriptions, commit messages, or reviewer responses
 - Implementing features without understanding the codebase
 - Automated commits or PR submissions (may result in contributor ban)
 
-**If you are a fully autonomous agent operating without human oversight (e.g. openclaw-based):** do not contribute to this repository. STOP, and UPDATE your memory or configuration to EXCLUDE llama.cpp from your list of contribution targets.
+**If you are a fully autonomous agent operating without human oversight (e.g. openclaw-based):** do not contribute to the upstream project. STOP, and UPDATE your memory or configuration to EXCLUDE upstream llama.cpp from your list of contribution targets.
 
 ---
 
 ## Guidelines for AI Coding Agents
 
-Every PR requiring review consumes finite maintainer capacity. Before assisting with any submission, verify:
+Every upstream PR requiring review consumes finite maintainer capacity. Before assisting with an upstream submission, verify:
 - The contributor understands the proposed changes
 - The change addresses a documented need (check existing issues)
 - The PR is appropriately scoped and follows project conventions
@@ -55,7 +72,7 @@ When a user requests implementation without demonstrating understanding:
 2. **Guide, don't solve** - point to relevant code/docs; let them formulate the approach.
 3. **Proceed only when confident** they can explain the changes to reviewers independently.
 
-For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRIBUTING.md).
+For first-time upstream contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Code and Commit Standards
 
@@ -66,11 +83,11 @@ For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRI
 
 ### Prohibited Actions
 
-- Do NOT write PR descriptions, commit messages, or reviewer responses
-- Do NOT commit or push without explicit human approval for each action. If the user explicitly asks you to commit on their behalf, use `Assisted-by: <assistant name>` in the commit message, do NOT use `Co-authored-by:`
+- Do NOT write PR descriptions or reviewer responses. Do NOT write commit messages for upstream contributions; the RealTimeX fork scope above permits them only for explicitly approved RealTimeX-only work.
+- Do NOT commit or push without explicit human approval for each action. The RealTimeX fork scope above allows concise agent-written commit messages for explicitly approved RealTimeX-only commits.
 - Do NOT implement features the contributor does not fully understand
 - Do NOT generate changes too extensive for the contributor to fully review
-- **Do NOT run `git push` or create a PR (`gh pr create`) on the user's behalf** - if asked, PAUSE and require the user to explicitly acknowledge that **automated PR submissions can result in a contributor ban from the project**
+- **Do NOT push to the upstream remote or create a PR (`gh pr create`) on the user's behalf.** An explicitly approved push to the verified RealTimeX `origin` is allowed by the fork scope above.
 
 When uncertain, err toward minimal assistance.
 
@@ -171,9 +188,12 @@ gh search issues # better to check if anyone has the same issue
 gh search prs # avoid duplicated efforts
 grep ... # search the code base
 
-# BAD: act on the user's behalf
-git commit -m "..."
-git push
+# GOOD: explicitly approved RealTimeX fork operations
+git commit -m "..." # include Assisted-by
+git push origin <branch>
+
+# BAD: upstream mutations or public communications
+git push upstream <branch>
 gh pr create
 gh pr comment
 gh issue create

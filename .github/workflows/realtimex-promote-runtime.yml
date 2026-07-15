@@ -28,7 +28,7 @@ on:
         type: boolean
         default: true
       build_linux_cuda_arm64:
-        description: "Build linux-arm64-cuda (optional / DGX-style)"
+        description: "Build linux-arm64-cuda (optional / Jetson Orin SM87)"
         required: false
         type: boolean
         default: false
@@ -39,10 +39,10 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: realtimex-promote-runtime-${{ github.event.inputs.llama_cpp_tag }}
+  group: realtimex-promote-runtime-${{ inputs.llama_cpp_tag }}
   cancel-in-progress: false
 
 env:
@@ -57,24 +57,28 @@ jobs:
       tag: ${{ steps.normalize.outputs.tag }}
       release_tag: ${{ steps.normalize.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
 
       - name: Normalize / validate tag
         id: normalize
+        env:
+          RAW_TAG: ${{ inputs.llama_cpp_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          raw="${{ github.event.inputs.llama_cpp_tag }}"
-          tag="$(echo "$raw" | tr -d '[:space:]')"
+          tag="$(printf '%s' "$RAW_TAG" | tr -d '[:space:]')"
           if [[ ! "$tag" =~ ^b[0-9]+$ ]]; then
             echo "Invalid tag: $tag (expected bNNNN)"
             exit 1
           fi
           # Ensure the upstream release exists
           code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
             "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${tag}" || true)"
           if [[ "$code" != "200" ]]; then
             echo "Upstream release not found: ggml-org/llama.cpp@${tag} (HTTP ${code})"
@@ -82,13 +86,13 @@ jobs:
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "release_tag=realtimex-${tag}" >> "$GITHUB_OUTPUT"
-          echo "Promoting llama.cpp ${tag} → release realtimex-${tag}"
+          echo "Promoting llama.cpp ${tag} -> release realtimex-${tag}"
 
   repack-official:
     name: Repack ${{ matrix.id }}
     needs: validate-tag
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event.inputs.fail_on_missing_official != 'true' }}
+    continue-on-error: ${{ inputs.fail_on_missing_official == false }}
     strategy:
       fail-fast: false
       matrix:
@@ -104,13 +108,14 @@ jobs:
           - id: win32-x64-cuda
           - id: win32-x64-vulkan
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -129,30 +134,32 @@ jobs:
 
       - name: Upload dist artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-${{ matrix.id }}
           path: realtimex-dist/*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   build-linux-cuda-x64:
     name: Build linux-x64-cuda
     needs: validate-tag
-    if: github.event.inputs.build_linux_cuda_x64 == 'true'
+    if: inputs.build_linux_cuda_x64
     runs-on: ubuntu-22.04
     # Multi-arch CUDA is the bottleneck; keep this job focused.
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ggml-org/llama.cpp
           ref: ${{ needs.validate-tag.outputs.tag }}
           path: llama.cpp
           fetch-depth: 1
+          persist-credentials: false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
@@ -167,14 +174,14 @@ jobs:
 
       # Cache toolkit downloads between runs (large win on cold runners)
       - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.30
+        uses: Jimver/cuda-toolkit@b6fc3a9f3f15256d9d94ffe1254f9c5a2565cde6 # v0.2.30
         with:
           cuda: "12.4.0"
           method: network
           use-github-cache: true
 
       - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639 # v1.2
         with:
           key: linux-x64-cuda-${{ needs.validate-tag.outputs.tag }}
           restore-keys: |
@@ -183,15 +190,14 @@ jobs:
 
       # llama-server lives under tools/; LLAMA_BUILD_TOOLS must be ON.
       # Speed notes:
-      # - Fewer CUDA arches = much faster compile (was 75;80;86;89;90).
-      # - 86+89 covers Ampere consumer + Ada; add 75/80 only if you need older GPUs.
+      # - Build real SASS for common deployed generations.
+      # - Keep PTX for the highest architecture to provide forward compatibility.
       # - Build only target llama-server (not full tools suite).
       # - ccache speeds rebuilds when the same tag/re-run hits similar objects.
       - name: Configure & build llama-server
         working-directory: llama.cpp
         env:
-          # Prefer real SASS only (no fat multi-arch blob)
-          CMAKE_CUDA_ARCHITECTURES: "86-real;89-real"
+          CMAKE_CUDA_ARCHITECTURES: "75-real;80-real;86-real;89-real;90"
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CMAKE_CUDA_COMPILER_LAUNCHER: ccache
@@ -227,7 +233,7 @@ jobs:
           find build -name 'llama-server' -type f -print
           ccache -s || true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -244,28 +250,30 @@ jobs:
             --build-dir llama.cpp/build
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-linux-x64-cuda
           path: realtimex-dist/*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   build-linux-cuda-arm64:
     name: Build linux-arm64-cuda
     needs: validate-tag
-    if: github.event.inputs.build_linux_cuda_arm64 == 'true'
+    if: inputs.build_linux_cuda_arm64
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ggml-org/llama.cpp
           ref: ${{ needs.validate-tag.outputs.tag }}
           path: llama.cpp
           fetch-depth: 1
+          persist-credentials: false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
@@ -280,7 +288,7 @@ jobs:
       - name: Install CUDA toolkit (arm64)
         # Network toolkit action may not support all arm hosts; fall back to distro packages when needed.
         continue-on-error: true
-        uses: Jimver/cuda-toolkit@v0.2.30
+        uses: Jimver/cuda-toolkit@b6fc3a9f3f15256d9d94ffe1254f9c5a2565cde6 # v0.2.30
         with:
           cuda: "12.4.0"
           method: network
@@ -298,7 +306,7 @@ jobs:
           nvcc --version
 
       - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639 # v1.2
         with:
           key: linux-arm64-cuda-${{ needs.validate-tag.outputs.tag }}
           restore-keys: |
@@ -341,7 +349,7 @@ jobs:
           find build -name 'llama-server' -type f -print
           ccache -s || true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -358,20 +366,22 @@ jobs:
             --out-dir realtimex-dist
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-linux-arm64-cuda
           path: realtimex-dist/*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
-  assemble-and-publish:
-    name: Assemble${{ github.event.inputs.publish == 'true' && ' & publish' || '' }}
+  assemble:
+    name: Assemble runtime artifacts
     needs:
       - validate-tag
       - repack-official
       - build-linux-cuda-x64
       - build-linux-cuda-arm64
+    outputs:
+      complete: ${{ steps.collect.outputs.complete }}
     # Run even when optional CUDA jobs are skipped; still require tag validation.
     if: >-
       always()
@@ -383,18 +393,19 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Download all runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           pattern: runtime-*
@@ -405,6 +416,8 @@ jobs:
         env:
           TAG: ${{ needs.validate-tag.outputs.tag }}
           RELEASE_TAG: ${{ needs.validate-tag.outputs.release_tag }}
+          BUILD_X64: ${{ inputs.build_linux_cuda_x64 }}
+          BUILD_ARM64: ${{ inputs.build_linux_cuda_arm64 }}
         run: |
           set -euo pipefail
           mkdir -p realtimex-dist
@@ -421,11 +434,22 @@ jobs:
             exit 1
           fi
 
-          python3 "${REALTIMEX_SCRIPTS}/build_runtime_manifest.py" \
-            --dist-dir realtimex-dist \
-            --tag "${RELEASE_TAG}" \
-            --llama-cpp-release "${TAG}" \
+          manifest_args=(
+            "${REALTIMEX_SCRIPTS}/build_runtime_manifest.py"
+            --dist-dir realtimex-dist
+            --tag "${RELEASE_TAG}"
+            --llama-cpp-release "${TAG}"
             --out realtimex-dist/runtime-manifest.json
+            --require-official
+            --github-output
+          )
+          if [[ "$BUILD_X64" == "true" ]]; then
+            manifest_args+=(--require-matrix-id linux-x64-cuda)
+          fi
+          if [[ "$BUILD_ARM64" == "true" ]]; then
+            manifest_args+=(--require-matrix-id linux-arm64-cuda)
+          fi
+          python3 "${manifest_args[@]}"
 
           {
             echo "## RealTimeX runtime promote"
@@ -439,18 +463,67 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Report runtime completeness
+        env:
+          COMPLETE: ${{ steps.collect.outputs.complete }}
+          EXPECTED_COUNT: ${{ steps.collect.outputs.expectedCount }}
+          MISSING_COUNT: ${{ steps.collect.outputs.missingCount }}
+        run: |
+          set -euo pipefail
+          echo "- Complete runtime set: \`${COMPLETE}\` (${EXPECTED_COUNT} expected, ${MISSING_COUNT} missing)" \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload combined dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
           path: |
             realtimex-dist/*.zip
             realtimex-dist/runtime-manifest.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
-      - name: Publish GitHub release
-        if: github.event.inputs.publish == 'true'
+      - name: Reject incomplete publish request
+        if: inputs.publish && steps.collect.outputs.complete != 'true'
+        run: |
+          echo "Publishing requires the complete expected runtime set"
+          exit 1
+
+  publish:
+    name: Publish ${{ needs.validate-tag.outputs.release_tag }}
+    needs:
+      - validate-tag
+      - repack-official
+      - build-linux-cuda-x64
+      - build-linux-cuda-arm64
+      - assemble
+    if: >-
+      always()
+      && !cancelled()
+      && inputs.publish
+      && needs.validate-tag.result == 'success'
+      && needs.repack-official.result == 'success'
+      && needs.assemble.result == 'success'
+      && needs.assemble.outputs.complete == 'true'
+      && (
+        inputs.build_linux_cuda_x64 == false
+        || needs.build-linux-cuda-x64.result == 'success'
+      )
+      && (
+        inputs.build_linux_cuda_arm64 == false
+        || needs.build-linux-cuda-arm64.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download combined dist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: realtimex-runtime-${{ needs.validate-tag.outputs.tag }}
+          path: realtimex-dist
+
+      - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.validate-tag.outputs.tag }}
@@ -478,11 +551,10 @@ jobs:
           EOF
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} already exists; uploading/clobbering assets"
-            gh release upload "${RELEASE_TAG}" realtimex-dist/* --clobber
-            gh release edit "${RELEASE_TAG}" --notes-file "$notes"
-          else
-            gh release create "${RELEASE_TAG}" realtimex-dist/* \
-              --title "${RELEASE_TAG}" \
-              --notes-file "$notes"
+            echo "Release ${RELEASE_TAG} already exists; refusing to mutate it"
+            exit 1
           fi
+
+          gh release create "${RELEASE_TAG}" realtimex-dist/* \
+            --title "${RELEASE_TAG}" \
+            --notes-file "$notes"

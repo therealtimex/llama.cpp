@@ -35,7 +35,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: realtimex-watch-upstream
@@ -55,13 +54,14 @@ jobs:
       releaseTag: ${{ steps.compare.outputs.releaseTag }}
       should_dispatch: ${{ steps.decide.outputs.should_dispatch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             realtimex
           sparse-checkout-cone-mode: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -69,9 +69,11 @@ jobs:
         id: compare
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_TAG: ${{ inputs.force_tag }}
+          PACKAGING_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          FORCE="${{ github.event.inputs.force_tag || '' }}"
+          FORCE="${FORCE_TAG}"
           FORCE="$(echo "$FORCE" | tr -d '[:space:]')"
 
           if [[ -n "$FORCE" ]]; then
@@ -89,7 +91,7 @@ jobs:
 
           python3 realtimex/scripts/watch_upstream.py \
             --upstream-repo ggml-org/llama.cpp \
-            --packaging-repo "${{ github.repository }}" \
+            --packaging-repo "${PACKAGING_REPO}" \
             --token "${GITHUB_TOKEN}" \
             --github-output
 
@@ -112,16 +114,17 @@ jobs:
 
       - name: Decide dispatch
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          UPDATED: ${{ steps.compare.outputs.updated }}
+          WANT_MANUAL: ${{ inputs.dispatch_promote }}
         run: |
           set -euo pipefail
-          UPDATED="${{ steps.compare.outputs.updated }}"
-          # schedule defaults: detect only (no promote) unless inputs present
-          # workflow_dispatch: honor inputs (default dispatch_promote=true)
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            WANT="${{ github.event.inputs.dispatch_promote }}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            WANT="$WANT_MANUAL"
           else
-            # Cron: auto dry-run promote when behind (safe: publish stays false)
-            WANT="true"
+            # Cron detects only. Manual dispatch controls expensive promotion runs.
+            WANT="false"
           fi
 
           if [[ "$UPDATED" == "true" && "$WANT" == "true" ]]; then
@@ -135,14 +138,17 @@ jobs:
     needs: watch
     if: needs.watch.outputs.should_dispatch == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Dispatch realtimex-promote-runtime
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.watch.outputs.latestUpstream }}
-          # publish only when manually requested; cron always false
-          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish || 'false' }}
-          BUILD_CUDA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_linux_cuda_x64 || 'true' }}
+          REPO: ${{ github.repository }}
+          PUBLISH: ${{ inputs.publish }}
+          BUILD_CUDA: ${{ inputs.build_linux_cuda_x64 }}
         run: |
           set -euo pipefail
           # Normalize boolean-ish inputs to true/false strings for workflow inputs
@@ -159,7 +165,7 @@ jobs:
 
           echo "Dispatching promote for ${TAG} (publish=${PUBLISH_FLAG}, linux_cuda_x64=${CUDA_FLAG})"
           gh workflow run realtimex-promote-runtime.yml \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             -f "llama_cpp_tag=${TAG}" \
             -f "publish=${PUBLISH_FLAG}" \
             -f "build_linux_cuda_x64=${CUDA_FLAG}" \
@@ -174,5 +180,5 @@ jobs:
             echo "- build_linux_cuda_x64: \`${CUDA_FLAG}\`"
             echo "- build_linux_arm64_cuda: \`false\` (use DGX Spark on-device)"
             echo ""
-            echo "Monitor: https://github.com/${{ github.repository }}/actions/workflows/realtimex-promote-runtime.yml"
+            echo "Monitor: https://github.com/${REPO}/actions/workflows/realtimex-promote-runtime.yml"
           } >> "$GITHUB_STEP_SUMMARY"

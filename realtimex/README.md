@@ -20,8 +20,8 @@ This fork is a **RealTimeX packaging surface**, not upstream CI.
 
 Workflows kept:
 
-- `.github/workflows/realtimex-promote-runtime.yml` — build/repack/publish runtimes
-- `.github/workflows/realtimex-watch-upstream.yml` — watch `ggml-org/llama.cpp` for new `b*` tags
+- `.github/workflows/realtimex-promote-runtime.yml` - build/repack/publish runtimes
+- `.github/workflows/realtimex-watch-upstream.yml` - watch `ggml-org/llama.cpp` for new `b*` tags
 
 All other upstream Actions (build matrices, release, lint bots, UI, Docker, etc.) are removed so pushes/syncs do not burn CI. Re-evaluate after merging from `ggml-org/llama.cpp` if workflows are restored.
 
@@ -48,7 +48,9 @@ gh workflow run realtimex-promote-runtime.yml \
   -f build_linux_cuda_arm64=false
 ```
 
-### Watch upstream (from node-llama-cpp “Watch llama.cpp”)
+Publishing requires the complete official asset matrix plus every enabled self-build. Published `realtimex-b*` releases are immutable; use a new tag rather than rerunning a published release.
+
+### Watch upstream (from node-llama-cpp "Watch llama.cpp")
 
 [`.github/workflows/realtimex-watch-upstream.yml`](../.github/workflows/realtimex-watch-upstream.yml)
 
@@ -56,7 +58,7 @@ Polls `ggml-org/llama.cpp` for newer `b*` tags than the latest `realtimex-b*` re
 
 | Mode | Behavior |
 |------|----------|
-| Cron (every 3h) | If behind → dispatch **promote dry-run** (`publish=false`) |
+| Cron (every 3h) | Detect and report only; does not dispatch an expensive build |
 | Manual | Can force tag, toggle promote/publish/cuda |
 
 **Not automated here:** DGX Spark `linux-arm64-cuda` (build on-device, upload to the release).
@@ -89,9 +91,9 @@ python3 realtimex/scripts/watch_upstream.py --json
 | `scripts/runtime_packaging.py` | Shared matrix, meta writer, zip helpers |
 | `scripts/write_nlc_metadata.py` | CLI for `_nlcBuildMetadata.json` |
 | `scripts/validate_runtime_zip.py` | Validate zip for app compatibility |
-| `scripts/repack_official_runtime.py` | Download official pack → RealTimeX zip |
+| `scripts/repack_official_runtime.py` | Download official pack -> RealTimeX zip |
 | `scripts/package_built_runtime.py` | Package local cmake `llama-server` build |
-| `scripts/build_runtime_manifest.py` | Emit `runtime-manifest.json` |
+| `scripts/build_runtime_manifest.py` | Emit `runtime-manifest.json` and verify the required matrix |
 | `scripts/list_matrix.py` | Dump packaging matrix |
 | `scripts/watch_upstream.py` | Compare upstream `b*` vs `realtimex-b*` releases |
 
@@ -118,8 +120,8 @@ python3 realtimex/scripts/package_built_runtime.py \
 
 ## Asset matrix (summary)
 
-**Official → repack:** macOS arm64/x64, Linux CPU/Vulkan, Windows CPU/CUDA/Vulkan  
-**Self-build:** Linux x64 CUDA (default on), Linux arm64 CUDA (opt-in)
+- **Official -> repack:** macOS arm64/x64, Linux CPU/Vulkan, Windows CPU/CUDA/Vulkan
+- **Self-build:** Linux x64 CUDA (default on), Linux arm64 CUDA (opt-in)
 
 GPU naming rules (must match RealTimeX Go/JS):
 
@@ -132,10 +134,11 @@ GPU naming rules (must match RealTimeX Go/JS):
 
 | Setting | Value | Why |
 |---------|-------|-----|
-| CUDA arches | `86-real;89-real` | ~2–5× fewer NVCC units than `75;80;86;89;90` |
+| CUDA arches | `75-real;80-real;86-real;89-real;90` | SASS for common deployed GPUs plus SM90 PTX for forward compatibility |
 | ccache | on | Faster re-runs / same-tag rebuilds |
 | Target | `llama-server` only | Avoid compiling unused tools |
 | Toolkit cache | `use-github-cache: true` | Skip re-downloading CUDA |
+| Transfer artifact retention | 1 day | Matrix artifacts are temporary inputs to assembly |
+| Combined artifact retention | 7 days | Preserve dry-run output without long-term duplication |
 
-Trade-off: drops older GPUs (e.g. Turing `75`) from the **GHA** linux-x64-cuda zip. Expand `CMAKE_CUDA_ARCHITECTURES` if you need broader cards. DGX Spark stays on-device (`121`).
-
+The generic Linux x64 CUDA package covers Turing (`75`), Ampere (`80`/`86`), Ada (`89`), and Hopper (`90`). The opt-in GHA arm64 CUDA package targets Jetson Orin (`87`); DGX Spark stays on-device (`121`).
